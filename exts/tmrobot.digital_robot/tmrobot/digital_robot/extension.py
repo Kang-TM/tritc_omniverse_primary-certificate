@@ -23,6 +23,7 @@ from omni.isaac.core.utils.stage import (
     update_stage_async,
 )
 from omni.isaac.core.utils.types import ArticulationAction
+from omni.isaac.core.utils.viewports import set_camera_view
 from omni.isaac.core.world.world import World
 from omni.isaac.surface_gripper._surface_gripper import (  # noqa
     Surface_Gripper,
@@ -44,10 +45,7 @@ from tmrobot.digital_robot.services.virtual_camera_server import (
 from tmrobot.digital_robot.ui import constants as const  # type: ignore
 from tmrobot.digital_robot.ui.extension_ui import ExtensionUI  # type: ignore
 
-# omni.kit.app.log_deprecation("has corrupted data in primvar")
-
 logger = logging.getLogger(__name__)
-
 viewport = vp_utils.get_active_viewport()
 
 
@@ -82,16 +80,12 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         # fmt: on
 
     def on_startup(self, ext_id):
-        # known issue: To suppress the generation of excessive logs [Info] [omni.usd.audio] resetting the animation timeline # noqa
-        omni.kit.commands.execute(
-            "ToolbarPlayFilterChecked",
-            setting_path="/app/player/audio/enabled",
-            enabled=False,
-        )
-
         self._ext_id = ext_id
         self._ext_ui = ExtensionUI(
-            self._ext_id, self._on_start_service, self._on_stop_service
+            self._ext_id,
+            self._on_start_service,
+            self._on_stop_service,
+            self._change_scene_camera_position,
         )
 
         self.initialize()
@@ -143,7 +137,27 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         gc.collect()
         return
 
+    def _change_scene_camera_position(self):
+        # Allow to customize the scene camera position as your need
+        omni.kit.commands.execute(
+            "ChangeProperty",
+            prop_path=Sdf.Path(f"{const.SCENE_CAMERA_PATH}.xformOp:translate"),
+            value=Gf.Vec3d(7, 4, 3),
+            prev=None,
+        )
+
+        omni.kit.commands.execute(
+            "ChangeProperty",
+            prop_path=Sdf.Path(f"{const.SCENE_CAMERA_PATH}.xformOp:orient"),
+            value=Gf.Quatd(
+                0.38,
+                Gf.Vec3d(0.30, 0.53, 0.70),
+            ),
+            prev=None,
+        )
+
     def _on_start_service(self):
+
         if not self._ext_ui.validate_form(self._world):
             return
 
@@ -158,11 +172,10 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         if self._world.stage.GetPrimAtPath(
             Sdf.Path(self._default_workpieces_prim_path)
         ).IsValid():
-            # Known issue: Get warning message below when remove prim
-            # ... delegate.cpp -- Failed verification: ' prim '
             self._world.stage.RemovePrim(self._default_workpieces_prim_path)
 
         self._robot_settings = self._get_activated_robots_setting()
+
         # Check if TMSimulator services are available
         for setting in self._robot_settings:
             self._console(f"Add {setting.name} to the scene")
@@ -170,15 +183,16 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             # Check if the status of TMSimulator Virtual Camera API is Activated
             echo_client = EchoClient(setting.ip)
             if not echo_client.connectVirtualCameraAPI():
-                error_message = (
-                    f"Can't connect to {setting.name} TMSimulator at IP: {setting.ip}, "
-                    "please check if the status of TMSimulator is started and Virtual Camera API is enabled"
+                warning_message = (
+                    f"Can't connect to {setting.name} Virtual Camera API at IP: {setting.ip}, "
+                    "please check if Virtual Camera API is enabled if you are using TMSimulator. "
+                    "You can ignore this message if you are using TMFlow with physical robot."
                 )
-                logger.error(error_message)
-                self._ext_ui.update_message(error_message)
-                self._ext_ui.change_action_mode(const.BUTTON_START_SERVICE)
-                self._ext_ui.collapsed_robot_settings(True)
-                return
+                logger.warning(warning_message)
+                self._ext_ui.update_message(warning_message)
+                # self._ext_ui.change_action_mode(const.BUTTON_START_SERVICE)
+                # self._ext_ui.collapsed_robot_settings(True)
+                # return
 
             # Check if the status of TMSimulator Ethernet Slave is Enabled
             if not self._is_service_on(setting.ip, const.PORT_ETHERNET):
@@ -217,8 +231,6 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             if self._world.stage.GetPrimAtPath(
                 Sdf.Path(self._default_workpieces_prim_path)
             ).IsValid():
-                # Known issue: Get warning message below when remove prim
-                # ... delegate.cpp -- Failed verification: ' prim '
                 self._world.stage.RemovePrim(self._default_workpieces_prim_path)
 
             # Create new workpiece
@@ -285,7 +297,7 @@ class TMDigitalRobotExtension(omni.ext.IExt):
                 if actual_robot_model != robot.model:
                     robot_models_are_different.append(
                         f"{robot.name}: Virtual Robot model {robot.model} is connect to a "
-                        f"{actual_robot_model} TMSimulator model"
+                        f"TMSimulator model {actual_robot_model}, which may cause unexpected behavior"
                     )
 
                 self._console(
@@ -339,18 +351,18 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             #             self._spawn_workpiece()
             #             self._ethernet_masters[motion.robot_name].set_end_di(0, 1)
 
-            # === (Optional) Uncomment the code below to trace FPS ===
-            # self._receive_count[motion.robot_name] = motion.receive_count
-            # total_receive_count = sum(self._receive_count.values())
-            # self._console(
-            #     f"rec/sim/qsize/fps :{total_receive_count}/{self._simulation_count}/{self._motion_queue.qsize()}/{viewport.fps:.2f}"  # noqa
-            # )
-
         except queue.Empty:
             pass
             # logger.warning("Motion queue is empty")
         except Exception as e:
             logger.warning(f"Failed to update robot motion: {e}, {motion}")
+
+        # === (Optional) Uncomment the code below to trace FPS ===
+        # self._receive_count[motion.robot_name] = motion.receive_count
+        # total_receive_count = sum(self._receive_count.values())
+        # self._console(
+        #     f"rec/sim/qsize/fps :{total_receive_count}/{self._simulation_count}/{self._motion_queue.qsize()}/{viewport.fps:.2f}"  # noqa
+        # )
 
     def _on_stop_service(self):
         async def _on_stop_service_async():
@@ -363,8 +375,6 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             if self._world.stage.GetPrimAtPath(
                 Sdf.Path(self._default_workpieces_prim_path)
             ).IsValid():
-                # Known issue: Get warning message below when remove prim
-                # ... delegate.cpp -- Failed verification: ' prim '
                 self._world.stage.RemovePrim(self._default_workpieces_prim_path)
 
             for robot in self._robot_settings:
@@ -467,8 +477,6 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             Gf.Vec3f(0, 0, random.uniform(0, 360))
         )
 
-        # Known issue: Get warning message below when set rigid body
-        # path.cpp -- Ill-formed SdfPath <>: syntax error
         omni.kit.commands.execute(
             "SetRigidBody",
             path=Sdf.Path(workpiece_prim_path),

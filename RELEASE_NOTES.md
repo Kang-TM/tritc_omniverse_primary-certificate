@@ -1,5 +1,22 @@
 # Release Notes
 
+## [2.22.9] - 2025-01-24
+
+-   Fixed error message: "Can't execute command: 'ChangeSetting'" on Isaac Sim startup
+-   Forced recovery of the default position of the eye-in-hand camera upon activation
+-   Added `change_scene_camera_position` function in `extension.py` to change the scene camera position
+
+## [2.22.8] - 2025-01-21
+
+-   Fixed external camera path from body to base
+-   Enabled Extension to connect to both of TMSimulator and TMFlow
+
+## [2.22.7] - 2025-01-17
+
+-   Add documentation: Case 3 Collaboration Accessories
+-   Add documentation: Case 4 FOV Settings of External Camera
+-   Refine the README.md document structure
+
 ## [2.22.6] - 2025-01-13
 
 -   Resolve the issue where the calibration board disappears when viewed through the EXT camera.
