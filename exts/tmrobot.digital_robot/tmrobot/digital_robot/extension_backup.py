@@ -267,7 +267,7 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             #             prim_paths=[Sdf.Path("/World/Accessories/sugar_box")],
             #             active=False,
             #         )
-            self._spawn_workpiece()
+            #     self._spawn_workpiece()
 
         # Play the world
         async def _play_world_async():
@@ -462,34 +462,20 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             f"{self._default_workpieces_prim_path}/workpiece_{self._workpiece_id}"
         )
 
-        absolute_path = f"{const.EXTENSION_ROOT_PATH}/assets/worlds/accessories/workpiece/SSD/SSD_1.usd"  # noqa
+        absolute_path = f"{const.EXTENSION_ROOT_PATH}/assets/worlds/accessories/workpiece/004_sugar_box/004_sugar_box.usd"  # noqa
 
         workpiece_prim = add_reference_to_stage(
             usd_path=absolute_path,
             prim_path=workpiece_prim_path,
         ).GetPrim()
 
-        # Transform workpiece to Xformable
-        xformable = UsdGeom.Xformable(workpiece_prim)
-        # If needed clear the previous transform op
-        # xformable.ClearXformOpOrder()
-        translate_op = xformable.AddTranslateOp()
-        translate_op.Set(Gf.Vec3d(self._default_workpiece_position))
-    
-        scale_op = xformable.AddScaleOp()
-        scale_op.Set(Gf.Vec3f(1, 1, 1))
-    
-        rotate_op = xformable.AddRotateXYZOp()
-        rotate_op.Set(Gf.Vec3f(0, 0, random.uniform(0, 360)))
-
-        # old version
-        # workpiece_prim.GetAttribute("xformOp:translate").Set(
-        #     Gf.Vec3d(self._default_workpiece_position)
-        # )
-        # workpiece_prim.GetAttribute("xformOp:scale").Set(Gf.Vec3f(0.5, 0.5, 0.5))
-        # workpiece_prim.GetAttribute("xformOp:rotateXYZ").Set(
-        #     Gf.Vec3f(0, 0, random.uniform(0, 360))
-        # )
+        workpiece_prim.GetAttribute("xformOp:translate").Set(
+            Gf.Vec3d(self._default_workpiece_position)
+        )
+        workpiece_prim.GetAttribute("xformOp:scale").Set(Gf.Vec3f(0.5, 0.5, 0.5))
+        workpiece_prim.GetAttribute("xformOp:rotateXYZ").Set(
+            Gf.Vec3f(0, 0, random.uniform(0, 360))
+        )
 
         omni.kit.commands.execute(
             "SetRigidBody",
