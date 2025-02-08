@@ -344,6 +344,7 @@ class TMDigitalRobotExtension(omni.ext.IExt):
                         self._surface_gripper.close()
                         self._console("Surface Gripper suck")
                         self._ethernet_masters[motion.robot_name].set_end_di(0, 0)
+                        self._check_and_remove_extra_workpiece()
 
                     if self._surface_gripper_state == 0:
                         self._surface_gripper.open()
@@ -499,3 +500,28 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         )
 
         self._console(f"{workpiece_prim_path} is spawned")
+
+    def _check_and_remove_extra_workpiece(self):
+        
+        workpieces_prim = self._world.stage.GetPrimAtPath(
+            Sdf.Path(self._default_workpieces_prim_path)
+        )
+        if not workpieces_prim:
+            self._console(f"prim {self._default_workpieces_prim_path} invalid")
+            return
+
+        children = list(workpieces_prim.GetChildren())
+        if len(children) >= 2:
+            def extract_num(prim):
+                try:
+                    return int(prim.GetName().split('_')[-1])
+                except Exception:
+                    return 9999
+
+            children.sort(key=extract_num)
+            prim_to_remove = children[0]
+            self._world.stage.RemovePrim(prim_to_remove.GetPath())
+            self._console(f"Removed extra workpiece: {prim_to_remove.GetPath()}")
+        else:
+            self._console("workpiece < 2")
+
