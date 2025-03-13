@@ -11,9 +11,10 @@ from typing import List
 
 import numpy as np  # noqa
 import omni.kit.commands
-import omni.kit.viewport.utility as vp_utils
+import omni.kit.viewport.utility as vp_utils  # noqa
 import omni.usd
 import omni.usd.audio
+from omni.isaac.core.utils.prims import get_prim_at_path
 from omni.isaac.core.utils.stage import (
     add_reference_to_stage,
     clear_stage,
@@ -23,40 +24,40 @@ from omni.isaac.core.utils.stage import (
     update_stage_async,
 )
 from omni.isaac.core.utils.types import ArticulationAction
-from omni.isaac.core.utils.viewports import set_camera_view
 from omni.isaac.core.world.world import World
+from omni.isaac.manipulators import SingleManipulator  # noqa
+from omni.isaac.manipulators.grippers import ParallelGripper  # noqa
 from omni.isaac.surface_gripper._surface_gripper import (  # noqa
     Surface_Gripper,
     Surface_Gripper_Properties,
 )
-from pxr import Gf, Sdf, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom
+
+# isort: off
 from tmrobot.digital_robot.models.digital_camera import DigitalCamera  # type: ignore
 from tmrobot.digital_robot.models.digital_robot import DigitalRobot  # type: ignore
 from tmrobot.digital_robot.models.setting import ExtensionSetting  # type: ignore
 from tmrobot.digital_robot.models.setting import RobotSetting  # type: ignore
 from tmrobot.digital_robot.services.echo_client import EchoClient  # type: ignore
 from tmrobot.digital_robot.services.ethernet_master import EthernetData  # type: ignore
-from tmrobot.digital_robot.services.ethernet_master import (
-    EthernetMaster,  # type: ignore; type: ignore
-)
-from tmrobot.digital_robot.services.virtual_camera_server import (
-    VirtualCameraServer,  # type: ignore; type: ignore
-)
+from tmrobot.digital_robot.services.ethernet_master import EthernetMaster  # type: ignore
+from tmrobot.digital_robot.services.virtual_camera_server_secure import VirtualCameraServerSecure  # type: ignore
 from tmrobot.digital_robot.ui import constants as const  # type: ignore
 from tmrobot.digital_robot.ui.extension_ui import ExtensionUI  # type: ignore
 
+# isort: on
+
 logger = logging.getLogger(__name__)
-viewport = vp_utils.get_active_viewport()
 
 
 class TMDigitalRobotExtension(omni.ext.IExt):
-    def initialize(self):
+    def _initialize(self):
         # fmt: off
-        logger.info(f"DEVELOPER_MODE: {const.DEVELOPER_MODE}")
+        logger.info(f"ADVANCED_MODE: {const.ADVANCED_MODE}")
         self._extension_setting = ExtensionSetting()
         self._models = {}
         self._virtual_camera_thread: threading.Thread = None
-        self._virtual_camera_server: VirtualCameraServer = None
+        self._virtual_camera_server: VirtualCameraServerSecure = None
         self._dg_robots: dict[str, DigitalRobot] = {}
         self._dg_cameras: dict[str, dict[str, DigitalCamera]] = {}  # [tmflow ip][camera name]
         self._ethernet_masters: dict[str, EthernetMaster] = {}  # [robot name]
@@ -65,14 +66,11 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         self._robot_settings: List[RobotSetting] = []
         self._set_queue = queue.Queue()
         self._simulation_count = 0
-        self._receive_count: dict[str, int] = {}
-        self._receive_count[const.ROBOT_LIST[0]] = 0
-        self._receive_count[const.ROBOT_LIST[1]] = 0
-        self._receive_count[const.ROBOT_LIST[2]] = 0
-        self._receive_count[const.ROBOT_LIST[3]] = 0
+        self.is_server_right = True
         self._fps_accumulated = 0
         self._surface_gripper_state = 0
         self._surface_gripper = None
+        self._parallel_gripper = None
         self._workpiece_id = 0
         self._world: World = World()
         self._default_workpiece_position = Gf.Vec3d(0.088, -0.02, 1.234)
@@ -86,9 +84,10 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             self._on_start_service,
             self._on_stop_service,
             self._change_scene_camera_position,
+            self._post_load_scene,
         )
 
-        self.initialize()
+        self._initialize()
 
     def on_shutdown(self):
 
@@ -109,7 +108,7 @@ class TMDigitalRobotExtension(omni.ext.IExt):
 
             if self._virtual_camera_server is not None:
                 self._virtual_camera_server.stop()
-                self._stop_all_async_functions()
+                # self._stop_all_async_functions()
 
             self._console("Services stopped")
         except Exception as e:
@@ -124,7 +123,6 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         if self._world is not None:
             self._world.stop()
             self._world.clear_all_callbacks()
-            self._current_tasks = None
 
         self._robot_settings = []
         self._ext_ui.clear()
@@ -138,6 +136,8 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         return
 
     def _change_scene_camera_position(self):
+        self._console("Change scene camera position")
+
         # Allow to customize the scene camera position as your need
         omni.kit.commands.execute(
             "ChangeProperty",
@@ -157,11 +157,10 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         )
 
     def _on_start_service(self):
-
         if not self._ext_ui.validate_form(self._world):
             return
 
-        self.initialize()
+        self._initialize()
         self._ext_ui.change_action_mode(const.BUTTON_STOP_SERVICE)
         self._ext_ui.update_message("Services started")
         self._ext_ui.collapsed_robot_settings(False)
@@ -190,9 +189,6 @@ class TMDigitalRobotExtension(omni.ext.IExt):
                 )
                 logger.warning(warning_message)
                 self._ext_ui.update_message(warning_message)
-                # self._ext_ui.change_action_mode(const.BUTTON_START_SERVICE)
-                # self._ext_ui.collapsed_robot_settings(True)
-                # return
 
             # Check if the status of TMSimulator Ethernet Slave is Enabled
             if not self._is_service_on(setting.ip, const.PORT_ETHERNET):
@@ -267,7 +263,7 @@ class TMDigitalRobotExtension(omni.ext.IExt):
                         prim_paths=[Sdf.Path("/World/Accessories/SSD_1")],
                         active=False,
                     )
-            self._spawn_workpiece()
+                self._spawn_workpiece()
 
         # Play the world
         async def _play_world_async():
@@ -286,36 +282,38 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             robot_models_are_different = []
 
             for robot in self._robot_settings:
-                self._ethernet_masters[robot.name] = EthernetMaster(
-                    robot.name, robot.ip
-                )
-
-                actual_robot_model = self._ethernet_masters[
-                    robot.name
-                ].get_robot_model()
-
-                if actual_robot_model != robot.model:
-                    robot_models_are_different.append(
-                        f"{robot.name}: Virtual Robot model {robot.model} is connect to a "
-                        f"TMSimulator model {actual_robot_model}, which may cause unexpected behavior"
+                if robot.activated:
+                    self._ethernet_masters[robot.name] = EthernetMaster(
+                        robot.name, robot.ip
                     )
 
-                self._console(
-                    f"{robot.name}({robot.model}) is connect to {robot.ip}({actual_robot_model})"
-                )
+                    actual_robot_model = self._ethernet_masters[
+                        robot.name
+                    ].get_robot_model()
 
-                self._ethernet_master_threads[robot.name] = threading.Thread(
-                    target=self._ethernet_masters[robot.name].receive_data,
-                    args=(self._motion_queue,),
-                )
+                    if actual_robot_model in const.ROBOT_MODELS:
+                        if actual_robot_model != robot.model:
+                            robot_models_are_different.append(
+                                f"{robot.name}: Virtual Robot model {robot.model} is connect to a "
+                                f"TMSimulator/TMflow model {actual_robot_model}, which may cause unexpected behavior"
+                            )
 
-                self._ethernet_master_threads[robot.name].start()
+                        self._console(
+                            f"{robot.name}({robot.model}) is connect to {robot.ip}({actual_robot_model})"
+                        )
+
+                    self._ethernet_master_threads[robot.name] = threading.Thread(
+                        target=self._ethernet_masters[robot.name].receive_data,
+                        args=(self._motion_queue,),
+                    )
+
+                    self._ethernet_master_threads[robot.name].start()
 
             if len(robot_models_are_different) > 0:
                 self._ext_ui.update_message("\n".join(robot_models_are_different))
 
         # Create Virtual Camera gRPC Server
-        self._virtual_camera_server = VirtualCameraServer(
+        self._virtual_camera_server = VirtualCameraServerSecure(
             self._set_queue, self._dg_cameras
         )
 
@@ -356,14 +354,7 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             pass
             # logger.warning("Motion queue is empty")
         except Exception as e:
-            logger.warning(f"Failed to update robot motion: {e}, {motion}")
-
-        # === (Optional) Uncomment the code below to trace FPS ===
-        # self._receive_count[motion.robot_name] = motion.receive_count
-        # total_receive_count = sum(self._receive_count.values())
-        # self._console(
-        #     f"rec/sim/qsize/fps :{total_receive_count}/{self._simulation_count}/{self._motion_queue.qsize()}/{viewport.fps:.2f}"  # noqa
-        # )
+            logger.warning(f"{motion.robot_name}: failed to update robot motion: {e}")
 
     def _on_stop_service(self):
         async def _on_stop_service_async():
@@ -388,9 +379,9 @@ class TMDigitalRobotExtension(omni.ext.IExt):
 
             if hasattr(self, "_virtual_camera_server"):
                 if self._virtual_camera_server is not None:
-                    self._virtual_camera_server.stop()
+                    await self._virtual_camera_server.stop()
 
-            self._stop_all_async_functions()
+            # self._stop_all_async_functions()
             self._ext_ui.change_action_mode(const.BUTTON_START_SERVICE)
             self._console("Services stopped")
             self._ext_ui.update_message("Services stopped")
@@ -403,18 +394,13 @@ class TMDigitalRobotExtension(omni.ext.IExt):
                 task
                 for task in asyncio.all_tasks()
                 if task is not asyncio.current_task()
+                and task.get_coro().__name__ in ["_server_main_loop", "start"]
             ]
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
         asyncio.ensure_future(_stop_all_async_functions_async())
-
-    def _console(self, message):
-        current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-        print(f"{current_time} [Info] [tmrobot.digital_robot] {message}")
-        logger.info(message)
 
     def _get_activated_robots_setting(self) -> List[RobotSetting]:
         active_robots = []
@@ -436,16 +422,12 @@ class TMDigitalRobotExtension(omni.ext.IExt):
                 logger.error(f"{ip}:{port} is not available. exception: {e}")
                 return False
 
-    def _is_prim_exist(self, prim_path: str) -> bool:
-        prim = self._world.stage.GetPrimAtPath(Sdf.Path(prim_path))
-        return prim.IsValid()
-
     def _spawn_workpiece(self):
-
         workpieces_prim = self._world.stage.GetPrimAtPath(
             Sdf.Path(self._default_workpieces_prim_path)
         )
 
+        # Check if the workpiece is already spawned, if yes, return
         spawn_position = self._default_workpiece_position
         for workpiece in workpieces_prim.GetChildren():
             path: str = workpiece.GetPath()
@@ -463,8 +445,8 @@ class TMDigitalRobotExtension(omni.ext.IExt):
             f"{self._default_workpieces_prim_path}/workpiece_{self._workpiece_id}"
         )
 
+        # Create a workpiece
         absolute_path = f"{const.EXTENSION_ROOT_PATH}/assets/worlds/accessories/workpiece/SSD/SSD_1.usd"  # noqa
-
         workpiece_prim = add_reference_to_stage(
             usd_path=absolute_path,
             prim_path=workpiece_prim_path,
@@ -482,24 +464,119 @@ class TMDigitalRobotExtension(omni.ext.IExt):
     
         rotate_op = xformable.AddRotateXYZOp()
         rotate_op.Set(Gf.Vec3f(0, 0, random.uniform(0, 360)))
-
-        # old version
-        # workpiece_prim.GetAttribute("xformOp:translate").Set(
-        #     Gf.Vec3d(self._default_workpiece_position)
-        # )
+        
+        # Old Version
+        # Place the workpiece on the table
+        # fmt: off
+        # workpiece_prim.GetAttribute("xformOp:translate").Set(Gf.Vec3d(self._default_workpiece_position))
         # workpiece_prim.GetAttribute("xformOp:scale").Set(Gf.Vec3f(0.5, 0.5, 0.5))
-        # workpiece_prim.GetAttribute("xformOp:rotateXYZ").Set(
-        #     Gf.Vec3f(0, 0, random.uniform(0, 360))
-        # )
+        # workpiece_prim.GetAttribute("xformOp:rotateXYZ").Set(Gf.Vec3f(0, 0, random.uniform(0, 360)))
+        # fmt: on
 
         omni.kit.commands.execute(
             "SetRigidBody",
             path=Sdf.Path(workpiece_prim_path),
-            approximationShape="convexHull",
+            #approximationShape="convexHull",
             kinematic=False,
         )
 
         self._console(f"{workpiece_prim_path} is spawned")
+
+    # === Common functions ===
+    def _is_prim_exist(self, prim_path: str) -> bool:
+        prim = self._world.stage.GetPrimAtPath(Sdf.Path(prim_path))
+        return prim.IsValid()
+
+    def _get_prim_size(self, prim_path: str) -> Gf.Vec3d:
+        bbox_cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(), includedPurposes=[UsdGeom.Tokens.default_]
+        )
+        bbox_cache.Clear()
+        prim = self._world.stage.GetPrimAtPath(Sdf.Path(prim_path))
+        prim_bbox = bbox_cache.ComputeWorldBound(prim)
+        prim_range = prim_bbox.ComputeAlignedRange()
+        prim_size: Gf.Vec3d = prim_range.GetSize()
+
+        return prim_size
+
+    def _set_prim_size(self, prim_path, target_size) -> None:
+        # Reset the prim scale to 1, 1, 1
+        omni.kit.commands.execute(
+            "ChangeProperty",
+            prop_path=Sdf.Path(f"{prim_path}.xformOp:scale"),
+            value=Gf.Vec3d(1, 1, 1),
+            prev=None,
+        )
+
+        # Get the original size of the prim
+        origin_size = self._get_prim_size(prim_path)
+        x = target_size[0] / origin_size[0]
+        y = target_size[1] / origin_size[1]
+        z = target_size[2] / origin_size[2]
+
+        # Set the prim scale to the target size by calculating the ratio
+        omni.kit.commands.execute(
+            "ChangeProperty",
+            prop_path=Sdf.Path(f"{prim_path}.xformOp:scale"),
+            value=Gf.Vec3d(x, y, z),
+            prev=None,
+        )
+
+        # Get the changed size of the prim
+        changed_size = self._get_prim_size(prim_path)
+        x = f"{changed_size[0]:.4f}"
+        y = f"{changed_size[1]:.4f}"
+        z = f"{changed_size[2]:.4f}"
+        self._console(f"Set prim size(Meter): x={x}, y={y}, z={z} {prim_path}")
+
+    def _move_to_target(
+        self, prim_path: str, target_position: tuple, step_size=0.001
+    ) -> bool:
+        prim = get_prim_at_path(prim_path)
+        # fmt: off
+        cx, cy, cz = [round(coord, 4) for coord in prim.GetPrim().GetAttribute("xformOp:translate").Get()]
+        tx, ty, tz = [round(coord, 4) for coord in target_position]
+        # fmt: on
+
+        # print(f"tx: {tx}, ty: {ty}, tz: {tz}")
+        # print(f"cx: {cx}, cy: {cy}, cz: {cz}")
+
+        if cx == tx and cy == ty and cz == tz:
+            return True
+
+        if cx < tx:
+            cx += step_size
+        elif cx > tx:
+            cx -= step_size
+
+        if cy < ty:
+            cy += step_size
+        elif cy > ty:
+            cy -= step_size
+
+        if cz < tz:
+            cz += step_size
+        elif cz > tz:
+            cz -= step_size
+
+        omni.kit.commands.execute(
+            "ChangeProperty",
+            prop_path=Sdf.Path(f"{prim_path}.xformOp:translate"),
+            value=Gf.Vec3d(cx, cy, cz),
+            prev=None,
+        )
+
+        return False
+
+    def _console(self, message):
+        current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        print(f"{current_time} [Info] [tmrobot.digital_robot] {message}")
+        logger.info(message)
+
+    def _post_load_scene(self):
+        # Do your custom actions after loading the scene
+        pass
 
     def _check_and_remove_extra_workpiece(self):
         
