@@ -1,5 +1,11 @@
 # Release Notes
 
+## [2.22.12] - 2025-03-14
+
+-   Fixed issue where the virtual camera server fails to stop on shutdown.
+-   Added landmark 2.0 in the default scene.
+-   Added step 4 to the setup guide for installation of Cache in the README.
+
 ## [2.22.11] - 2025-02-27
 
 -   Added robot model TM6S, TM16S and TM20S.

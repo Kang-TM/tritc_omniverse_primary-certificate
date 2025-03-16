@@ -25,8 +25,6 @@ from omni.isaac.core.utils.stage import (
 )
 from omni.isaac.core.utils.types import ArticulationAction
 from omni.isaac.core.world.world import World
-from omni.isaac.manipulators import SingleManipulator  # noqa
-from omni.isaac.manipulators.grippers import ParallelGripper  # noqa
 from omni.isaac.surface_gripper._surface_gripper import (  # noqa
     Surface_Gripper,
     Surface_Gripper_Properties,
@@ -53,7 +51,6 @@ logger = logging.getLogger(__name__)
 class TMDigitalRobotExtension(omni.ext.IExt):
     def _initialize(self):
         # fmt: off
-        logger.info(f"ADVANCED_MODE: {const.ADVANCED_MODE}")
         self._extension_setting = ExtensionSetting()
         self._models = {}
         self._virtual_camera_thread: threading.Thread = None
@@ -66,11 +63,8 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         self._robot_settings: List[RobotSetting] = []
         self._set_queue = queue.Queue()
         self._simulation_count = 0
-        self.is_server_right = True
-        self._fps_accumulated = 0
         self._surface_gripper_state = 0
         self._surface_gripper = None
-        self._parallel_gripper = None
         self._workpiece_id = 0
         self._world: World = World()
         self._default_workpiece_position = Gf.Vec3d(0.088, -0.02, 1.234)
@@ -90,6 +84,9 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         self._initialize()
 
     def on_shutdown(self):
+        if hasattr(self, "_virtual_camera_server"):
+            if self._virtual_camera_server is not None:
+                asyncio.ensure_future(self._virtual_camera_server.stop())
 
         if self._world.stage.GetPrimAtPath(Sdf.Path("/World")).IsValid():
             for robot in const.ROBOT_LIST:
@@ -103,16 +100,6 @@ class TMDigitalRobotExtension(omni.ext.IExt):
 
         if self._world.physics_callback_exists("sim_step"):
             self._world.remove_physics_callback("sim_step")
-
-        try:
-
-            if self._virtual_camera_server is not None:
-                self._virtual_camera_server.stop()
-                # self._stop_all_async_functions()
-
-            self._console("Services stopped")
-        except Exception as e:
-            logger.error(f"Services stopped with error: {e}")
 
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
@@ -351,10 +338,11 @@ class TMDigitalRobotExtension(omni.ext.IExt):
                         self._ethernet_masters[motion.robot_name].set_end_di(0, 1)
 
         except queue.Empty:
-            pass
             # logger.warning("Motion queue is empty")
-        except Exception as e:
-            logger.warning(f"{motion.robot_name}: failed to update robot motion: {e}")
+            pass
+        except Exception as e:  # noqa
+            # logger.warning(f"{motion.robot_name}: failed to update robot motion: {e}")
+            pass
 
     def _on_stop_service(self):
         async def _on_stop_service_async():
@@ -497,9 +485,26 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         prim_range = prim_bbox.ComputeAlignedRange()
         prim_size: Gf.Vec3d = prim_range.GetSize()
 
+        # Get the changed size of the prim
+        x = f"{prim_size[0]:.4f}"
+        y = f"{prim_size[1]:.4f}"
+        z = f"{prim_size[2]:.4f}"
+        self._console(f"Get prim size(Meter): x={x}, y={y}, z={z} {prim_path}")
+
         return prim_size
 
-    def _set_prim_size(self, prim_path, target_size) -> None:
+    def _set_prim_size(self, prim_path: str, target_size: tuple) -> None:
+        def __get_prim_size(prim_path: str) -> Gf.Vec3d:
+            bbox_cache = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(), includedPurposes=[UsdGeom.Tokens.default_]
+            )
+            bbox_cache.Clear()
+            prim = self._world.stage.GetPrimAtPath(Sdf.Path(prim_path))
+            prim_bbox = bbox_cache.ComputeWorldBound(prim)
+            prim_range = prim_bbox.ComputeAlignedRange()
+            prim_size: Gf.Vec3d = prim_range.GetSize()
+            return prim_size
+
         # Reset the prim scale to 1, 1, 1
         omni.kit.commands.execute(
             "ChangeProperty",
@@ -509,7 +514,7 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         )
 
         # Get the original size of the prim
-        origin_size = self._get_prim_size(prim_path)
+        origin_size = __get_prim_size(prim_path)
         x = target_size[0] / origin_size[0]
         y = target_size[1] / origin_size[1]
         z = target_size[2] / origin_size[2]
@@ -523,7 +528,7 @@ class TMDigitalRobotExtension(omni.ext.IExt):
         )
 
         # Get the changed size of the prim
-        changed_size = self._get_prim_size(prim_path)
+        changed_size = __get_prim_size(prim_path)
         x = f"{changed_size[0]:.4f}"
         y = f"{changed_size[1]:.4f}"
         z = f"{changed_size[2]:.4f}"
@@ -568,14 +573,14 @@ class TMDigitalRobotExtension(omni.ext.IExt):
 
         return False
 
-    def _console(self, message):
+    def _console(self, message: str):
         current_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         print(f"{current_time} [Info] [tmrobot.digital_robot] {message}")
         logger.info(message)
 
     def _post_load_scene(self):
-        # Do your custom actions after loading the scene
+        # Do your custom actions after loading the scene, for example get the size of the prim
         pass
 
     def _check_and_remove_extra_workpiece(self):
